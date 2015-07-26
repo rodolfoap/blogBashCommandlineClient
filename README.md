@@ -6,11 +6,13 @@ Edits wordpress blog entries, offline and completely from bash, creating an edit
 
 * On your linux box, put both files on a directory with executable permissions (you can use /usr/local/bin or ~/bin; we'll use the last one). For example, my own home directory is `/home/rodolfoap`, so I installed it like this:
 
+```
     /home/
     └── rodolfoap
         └── bin
             ├── blog
             └── class-IXR.php
+```
 
 The PATH variable was modified on the last line of my ~/.bashrc like this:
 

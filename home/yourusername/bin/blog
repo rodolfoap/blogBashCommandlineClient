@@ -1,0 +1,266 @@
+#!/usr/bin/php
+<?php	// See:	http://djzone.im/2011/04/simple-xml-rpc-client-to-wordpress-made-easy/
+	// API:	https://codex.wordpress.org/XML-RPC_MetaWeblog_API
+
+class Blog {
+	public $user = 'rodolfoap';
+	public $pass = 'NotHere,MyFriend';
+	public $site = 'http://blog.ydor.org';
+
+	public 	$posts, 	// array of posts
+		$drafts, 	// array of drafts
+		$categories, 	// array of categories
+		$xmlrpc, 	// the XmlRpc object
+		$bufdir, 	// normally, ~/.blog/
+		$dirtyContent;	// temporary var that holds a text (post of draft) formatted as a $content structure, read from disk and ready to upload it.
+
+// 0:	Initialize
+	function __construct() {
+		$this->bufdir = $_SERVER['HOME'].'/.blog';
+		if(!file_exists($this->bufdir)) { mkdir($this->bufdir, 0755, true); echo $this->bufdir." created.\n"; }
+		require(dirname(__FILE__).'/class-IXR.php');
+		$this->xmlrpc = new IXR_Client($this->site.'/xmlrpc.php');
+	}
+
+// 1:	Load from WWW
+	function loadCategoriesFromSite(){
+		echo "Getting categories... ";
+		if($this->xmlrpc->query('metaWeblog.getCategories', '', $this->user, $this->pass)){
+			echo "done.\n";
+			$this->categories=$this->xmlrpc->getResponse();
+		} else { echo "errors reading categories: ".$this->xmlrpc->getErrorCode().": ".$this->xmlrpc->getErrorMessage()."\n"; }
+	}
+	function loadPostsFromSite() {
+		echo "Getting posts... ";
+		if($this->xmlrpc->query('metaWeblog.getRecentPosts', '', $this->user, $this->pass)){
+			echo "done.\n";
+			foreach($this->xmlrpc->getResponse() as $post) { $this->posts[$post['postid']]=$post; }
+		} else { echo "errors reading blog: ".$this->xmlrpc->getErrorCode().": ".$this->xmlrpc->getErrorMessage()."\n"; }
+	}
+	function postToText($post){
+		$array = array_filter(explode('<p>', str_replace('</p>', '', str_replace("\n", "<p>", $post['description']))));
+		$categories=implode(', ', $post['categories']);
+		$fulltext=$post['title']."\n-----\n$categories\n-----\n"; 
+		foreach($array as $line) { $fulltext.=trim($line)."\n\n"; }
+		return $fulltext;
+	}
+	function downloadAll(){
+		$this->loadPostsFromSite();
+		if(isset($this->posts)  && sizeof($this->posts)>0)  { 
+			foreach (glob($this->bufdir."/post_*") as $file) { unlink($file); } 
+			foreach (glob($this->bufdir."/text_*") as $file) { unlink($file); } 
+		}
+		foreach($this->posts as $post) {
+			echo "Writing ".$this->bufdir.'/post_'.trim($post['postid'])."\n";
+			file_put_contents($this->bufdir.'/post_'.trim($post['postid']), json_encode($post));
+			echo "Writing ".$this->bufdir.'/text_'.trim($post['postid'])."\n";
+			file_put_contents($this->bufdir.'/text_'.trim($post['postid']), $this->postTotext($post));
+		}
+		$this->loadCategoriesFromSite();
+		if(isset($this->categories)  && sizeof($this->categories)>0)  { unlink($this->bufdir.'/categories'); }
+		echo "Writing ".$this->bufdir."/categories\n";
+		file_put_contents($this->bufdir.'/categories', json_encode($this->categories));
+	}
+
+// 2: 	Show user
+	function readPostsFromDisk(){
+		foreach (glob($this->bufdir."/post_*") as $file) { 
+			$post=json_decode(file_get_contents($file), true);
+			$this->posts[intval($post['postid'])]=$post;
+		}
+	}
+	function readDraftsFromDisk(){
+		foreach(glob($this->bufdir."/draft_*") as $fileName) {
+			preg_match('/[0-9]*$/', $fileName, $matches);
+			$this->drafts[$matches[0]]=$this->textToContentPost(file_get_contents($fileName));
+			$this->drafts[$matches[0]]['draftid']=$matches[0];
+		}
+	}
+	function readTextPostFromDisk($id){
+		$this->dirtyContent=$this->textToContentPost(file_get_contents($this->bufdir."/text_".trim($id)));
+	}
+	function readTextDraftFromDisk($id){
+		$this->dirtyContent=$this->textToContentPost(file_get_contents($this->bufdir."/draft_".trim($id)));
+	}
+	function printPosts(){
+		$this->readPostsFromDisk();
+		foreach($this->posts as $post) { echo " [".$post['postid']."]\t(".$post['post_status'].") \t".$post['title']."\n"; }
+	}
+	function printDrafts(){
+		$this->readDraftsFromDisk();
+		if(sizeof($this->drafts)>0) { foreach($this->drafts as $draft) { echo " [".$draft['draftid']."]\t(local) \t".$draft['title']."\n"; } }
+	}
+
+// 3:	Categories
+	function readCategoriesFromDisk(){
+		$this->categories=json_decode(file_get_contents($this->bufdir.'/categories'), true);
+	}
+	function printCategories(){
+		$this->readCategoriesFromDisk();
+		foreach($this->categories as $cat) { 
+			echo " [".$cat['categoryName']."]: ".$cat['categoryDescription']."\n"; 
+		}
+	}
+	function getCategoriesLine(){
+		$this->readCategoriesFromDisk();
+		foreach($this->categories as $cat) { $catNames[]=$cat['categoryName']; }
+		sort($catNames);
+		return implode(', ', $catNames);
+	}
+
+// 4:	Edit post
+	function choosePostOrDraft($id){
+		$file['name']=$this->bufdir.'/text_'.trim($id);
+		$file['local']=false;
+		if(!file_exists($file['name'])) { 
+			$file['name']=$this->bufdir.'/draft_'.trim($id);
+			$file['local']=true;
+			if(!file_exists($file['name'])) { 
+				echo "Error: file does not exist. Aborting.\n";
+				exit;
+			}
+		}
+		return $file;
+	}
+	function editPostOrDraft($id){
+		$filename=$this->choosePostOrDraft($id)['name'];
+		system ("vim $filename > $(tty)"); 
+	}
+	function textToContentPost($text){
+		unset($content);
+		$text_array = array_filter(explode("\n", $text));
+		$content['title']=$text_array[0];
+		$content['mt_keywords']=explode(', ', $text_array[2]);
+		$content['categories']=explode(', ', $text_array[2]);
+		unset($text_array[0], $text_array[1], $text_array[2], $text_array[3]);
+		$content['description'] = "<p>".implode("</p>\n\n<p>", $text_array)."</p>";
+		return $content;
+	}
+	function uploadContentPost($id) {
+		echo "Posting... ";
+		if($this->xmlrpc->query('metaWeblog.editPost', $id, $this->user, $this->pass, $this->dirtyContent, false) ) {
+			echo "Post $id updated successful.\n";
+		} else { echo "Post $id errors updating: ".$this->xmlrpc->getErrorCode().": ".$this->xmlrpc->getErrorMessage()."\n"; }
+	}
+
+// 5:	New post
+	function getMaxId(){
+		foreach (glob($this->bufdir."/text_*")  as $fileName) { $postIds[]=intval(substr($fileName, strlen($this->bufdir."/text_") -strlen($fileName))); }
+		if(isset($postIds) && sizeof($postIds)>0) { $postIds[]=max($postIds)+1000; } else { $postIds[]=1000; }
+		foreach (glob($this->bufdir."/draft_*") as $fileName) { $postIds[]=intval(substr($fileName, strlen($this->bufdir."/draft_")-strlen($fileName))); }
+		return max($postIds);
+	}
+	function createTextDraft(){
+		$draftFile=$this->bufdir.'/draft_'.($this->getMaxId()+1);
+		$categories=$this->getCategoriesLine();
+		file_put_contents($draftFile, "POST_TITLE[".mt_rand()."]\n-----\n".$categories."\n-----\nWrite here...");
+		echo "Draft ".$draftFile." was created.\n";
+	}
+
+// 6:	Upload
+	function uploadPostOrDraft($id, $publish){
+		$file=$this->choosePostOrDraft($id);
+		$filename=$file['name'];
+		if($file['local']) {	// draft_XXXX
+			$this->readTextDraftFromDisk($id);
+			$this->newPost($publish);
+			rename($filename, str_replace('/draft_', '/.DELETE.draft_', $filename));
+		} else {		// text_XX
+			$this->readTextPostFromDisk($id);
+			$this->updatePost($id, $publish);
+		}
+	}
+	function newPost($publish) {
+		echo "Posting... ";
+		if($this->xmlrpc->query('metaWeblog.newPost', '', $this->user, $this->pass, $this->dirtyContent, $publish) ) {
+			echo "Post added successfully.\n";
+			echo "Post state is: ".($publish?'publish':'unpublish')."\n";
+		} else {
+			echo "Post errors adding: ".$this->xmlrpc->getErrorCode().": ".$this->xmlrpc->getErrorMessage()."\n";
+		}
+	}
+	function updatePost($id, $publish) {
+		if( $this->xmlrpc->query('metaWeblog.editPost', $id, $this->user, $this->pass, $this->dirtyContent, $publish) ) {
+			echo "Post updated successfully.\n";
+			echo "Post $id state is: ".($publish?'publish':'unpublish')."\n";
+		} else {
+			echo "Post $id errors updating: ".$this->xmlrpc->getErrorCode().": ".$this->xmlrpc->getErrorMessage()."\n";
+		}
+	}
+
+// 7:	Change site status
+	function uploadStatus($id, $publish){
+		$this->dirtyContent='';
+		$this->updatePost($id, $publish);
+	}
+
+// 8:	Delete
+	function deletePost($id) {
+		echo "Deleting... ";
+		if($this->xmlrpc->query('metaWeblog.deletePost', '', $id, $this->user, $this->pass, false) ) {
+			echo "Post $id deleted successfully.\n";
+		} else {
+			echo "Post errors deleting: ".$this->xmlrpc->getErrorCode().": ".$this->xmlrpc->getErrorMessage()."\n";
+		}
+	}
+}
+
+function usage($app) { echo "Usage:\t$app [ help | download | list | listcat | edit [ID] | new | upload [ID] | publish [ID] | unpublish [ID] | delete [ID] ]\n"; }
+$op=$argc>1 ? $argv[1] : "help";
+switch($op){
+	case "download":
+		$blog=new Blog();
+		$blog->downloadAll();
+		break;
+	case "list":
+		$blog=new Blog();
+		$blog->printPosts();
+		$blog->printDrafts();
+		break;
+	case "listcat":
+		$blog=new Blog();
+		$blog->printCategories();
+		break;
+	case "edit":
+		if($argc>2){ 
+			$blog=new Blog();
+			$blog->editPostOrDraft($argv[2]);
+		} else { usage($argv[0]); }
+		break;
+	case "new":
+		$blog=new Blog();
+		$id=$blog->createTextDraft();
+		break;
+	case "upload":
+		if($argc>2){ 
+			$blog=new Blog();
+			$blog->uploadPostOrDraft($argv[2], false /* unpublished */ );
+			$blog->downloadAll();
+		} else { usage($argv[0]); }
+		break;
+	case "publish":
+		if($argc>2){ 
+			$blog=new Blog();
+			$blog->uploadStatus($argv[2], true);
+			$blog->downloadAll();
+		} else { usage($argv[0]); }
+		break;
+	case "unpublish":
+		if($argc>2){ 
+			$blog=new Blog();
+			$blog->uploadStatus($argv[2], false);
+			$blog->downloadAll();
+		} else { usage($argv[0]); }
+		break;
+	case "delete":
+		if($argc>2){ 
+			$blog=new Blog();
+			$blog->deletePost($argv[2]);
+			$blog->downloadAll();
+		} else { usage($argv[0]); }
+		break;
+	case "help":
+	default:
+		usage($argv[0]);
+		break;
+}
